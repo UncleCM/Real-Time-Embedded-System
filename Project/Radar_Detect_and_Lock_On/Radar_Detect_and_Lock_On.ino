@@ -32,6 +32,14 @@ struct RadarData {
 };
 RadarData radarData;
 SemaphoreHandle_t dataMutex;
+SemaphoreHandle_t modeChangeSemaphore; // Signal mode changes
+QueueHandle_t detectionQueue;          // Pass detection data between tasks
+
+struct DetectionEvent {
+  int angle;
+  int distance;
+  uint32_t timestamp;
+};
 
 struct Blip {
   float angle;
@@ -151,6 +159,13 @@ void TaskSearch(void *pvParameters) {
         Serial.print(distance);
         Serial.println("cm - LOCKING ON");
         
+        // Send detection event via queue
+        DetectionEvent evt = {sweepAngle, (int)distance, millis()};
+        xQueueSend(detectionQueue, &evt, 0);
+        
+        // Signal mode change
+        xSemaphoreGive(modeChangeSemaphore);
+        
         // Wake up tracking task
         vTaskResume(taskTrackHandle);
         
@@ -266,6 +281,9 @@ void TaskTrack(void *pvParameters) {
         currentMode = SEARCHING;
         stableCount = 0;
         Serial.println("[TRACK] Target lost - switching to search mode");
+        
+        // Signal mode change
+        xSemaphoreGive(modeChangeSemaphore);
         
         // Suspend this task, let search take over
         vTaskSuspend(NULL);
@@ -470,10 +488,14 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   servo.attach(SERVO_PIN);
+  
+  // Create synchronization primitives
   dataMutex = xSemaphoreCreateMutex();
+  modeChangeSemaphore = xSemaphoreCreateBinary();
+  detectionQueue = xQueueCreate(10, sizeof(DetectionEvent));
 
-  if (dataMutex == NULL) {
-    Serial.println("Failed to create mutex!");
+  if (dataMutex == NULL || modeChangeSemaphore == NULL || detectionQueue == NULL) {
+    Serial.println("Failed to create RTOS primitives!");
     while(1);
   }
 
@@ -488,6 +510,8 @@ void setup() {
   Serial.println("Radar System Initialized");
   Serial.println("Mode: SEARCH (0-180° sweep)");
   Serial.println("Tracking Range: 30cm");
+  Serial.println("RTOS: FreeRTOS on ESP32");
+  Serial.println("Tasks: 5 (2 cores)");
   Serial.println("=================================");
 }
 
